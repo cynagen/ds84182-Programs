@@ -1,15 +1,14 @@
 local musicfs = {}
-local computer = require "computer"
 
 --[[
 	MUSIC FS SPECS
-	
+
 	song structure:
 	64 bytes - song title
 	4 bytes - song length (in bytes)
-	2 bytes - song speed (in hertz)
+	4 bytes - song speed (in hertz) -- updated for v1a
 	n bytes - song data
-	
+
 	fs structure:
 	1 byte - number of songs on disk
 	n songs - all the songs on the disk
@@ -45,17 +44,17 @@ function musicfs.open(td)
 	print("Opening tape "..td.address.." for musicfs")
 	td.seek(-math.huge)
 	local mfs = {}
-	
+
 	local playingSongIndex
 	local playingSongCurrent
 	local playingSongStartTime
-	
+
 	local paused = false
 	local pausePointer
 	local pauseTime
-	
+
 	local onSongFinish
-	
+
 	local songs = {}
 	--read songs from disk
 	local nsongs = td.read(1):byte()
@@ -65,21 +64,26 @@ function musicfs.open(td)
 		local song = {}
 		song.name = stripnull(td.read(64))
 		song.length = fromu4(td.read(4))
-		song.speed = (fromu2(td.read(2))+1)/32768
-		song.lis = song.length/(song.speed*4096) --length in seconds
+		song.speed = fromu4(td.read(4))/48000 --updated for dfpwm v1a
+		song.lis = song.length/(song.speed*6000) --length in seconds (also v1a updated)
 		song.ptr = ptr
 		td.seek(song.length)
 		songs[i] = song
-		ptr = ptr+64+4+2+song.length
+		ptr = ptr+64+4+4+song.length
 		song.next = ptr
 		print("Song "..i..": "..song.name.." "..song.length.." "..song.speed.." "..song.ptr)
 	end
-	
+
 	function mfs.addSong(title,speed,buffer)
 		td.stop()
-		local length = buffer:seek("end",0)
+		local length
+		if buffer.getResponseHeaders then
+			length = tonumber(buffer.getResponseHeaders()["content-length"])
+		else
+			length = #buffer --:seek("end",0)
+		end
 		print("buffer length "..length)
-		buffer:seek("set",0)
+		--buffer:seek("set",0)
 		--get eost (end of song table)
 		local eost = 1
 		if songs[nsongs] then
@@ -99,21 +103,22 @@ function musicfs.open(td)
 		print("writing length")
 		td.write(tou4(length))
 		print("writing speed")
-		td.write(tou2((speed*32768)-1))
+		td.write(tou4((speed*48000))) --v1a updated
 		print("writing data")
-		local b = buffer:read(8192)
-		while b do
-			td.write(b)
-			b = buffer:read(8192)
-		end
+		td.write(buffer.readAll()) -- Fastest way to write
+		--local b = buffer.read(8192)
+		--while b do
+		--	td.write(b)
+		--	b = buffer.read(8192)
+		--end
 		nsongs = nsongs+1
 		print("adding to song table")
 		td.seek(-math.huge)
 		td.write(string.char(nsongs))
-		songs[nsongs] = {name=title,length=length,speed=speed,ptr=eost,next=eost+64+4+2+length,lis = length/(speed*4096)}
-		buffer:close()
+		songs[nsongs] = {name=title,length=length,speed=speed,ptr=eost,next=eost+64+4+4+length,lis = length/(speed*6000)} --v1a updated
+		buffer.close()
 	end
-	
+
 	function mfs.removeSong(index)
 		td.stop()
 		if index ~= nsong then
@@ -124,10 +129,10 @@ function musicfs.open(td)
 			--then we get how much we want to move them by
 			--and then we move them
 			local srcsong = songs[index]
-			local src = srcsong.ptr+64+4+2+srcsong.length
+			local src = srcsong.ptr+64+4+4+srcsong.length
 			local srcsize = 0
 			for i=index, nsongs do
-				srcsize = srcsize+64+4+2+songs[i].length
+				srcsize = srcsize+64+4+4+songs[i].length
 			end
 			local dest = srcsong.ptr
 			local srcdestdifference = src-dest --the number of bytes to move stuff by
@@ -158,27 +163,27 @@ function musicfs.open(td)
 		td.seek(-math.huge)
 		td.write(string.char(nsongs))
 	end
-	
+
 	function mfs.listSongs()
 		return ipairs(songs)
 	end
-	
+
 	function mfs.getNumberOfSongs()
 		return nsongs
 	end
-	
+
 	function mfs.playSong(index)
 		if paused and index == nil then paused = false td.seek(-math.huge) td.seek(pausePointer) td.play() return end
 		paused = false
 		td.seek(-math.huge)
-		td.seek(songs[index].ptr+64+4+2)
+		td.seek(songs[index].ptr+64+4+4)
 		td.setSpeed(songs[index].speed)
 		td.play()
 		playingSongIndex = index
 		playingSongCurrent = 0
-		playingSongStartTime = computer.uptime()
+		playingSongStartTime = os.clock()
 	end
-	
+
 	function mfs.stopSong()
 		paused = false
 		td.stop()
@@ -186,22 +191,22 @@ function musicfs.open(td)
 		playingSongCurrent = nil
 		playingSongStartTime = nil
 	end
-	
+
 	function mfs.pauseSong()
 		td.stop()
 		paused = true
 		pausePointer = mfs.getTapePtr()
-		pauseTime = computer.uptime()-playingSongStartTime
+		pauseTime = os.clock()-playingSongStartTime
 	end
-	
+
 	function mfs.isPaused() return paused end
-	
+
 	function mfs.update()
 		if paused then
-			playingSongStartTime = computer.uptime()-pauseTime
+			playingSongStartTime = os.clock()-pauseTime
 			playingSongCurrent = pauseTime
 		else
-			playingSongCurrent = computer.uptime()-playingSongStartTime
+			playingSongCurrent = os.clock()-playingSongStartTime
 			if playingSongCurrent>songs[playingSongIndex].lis then
 				--song finished
 				mfs.stopSong()
@@ -209,31 +214,32 @@ function musicfs.open(td)
 			end
 		end
 	end
-	
+
 	function mfs.onSongFinish(func)
 		onSongFinish = func
 	end
-	
+
 	function mfs.isPlaying()
 		return playingSongIndex
 	end
-	
+
 	function mfs.getCurrentPosition()
 		if playingSongIndex then
 			return playingSongCurrent, songs[playingSongIndex].lis
 		end
 	end
-	
+
 	function mfs.getSong(i)
 		return songs[i]
 	end
-	
+
 	function mfs.getTapePtr()
-		local ptr = td.seek(-math.huge)
-		td.seek(-ptr)
-		return -ptr
+		return td.getPosition()
+		--local ptr = td.seek(-math.huge)
+		--td.seek(-ptr)
+		--return -ptr
 	end
-	
+
 	return mfs
 end
 
